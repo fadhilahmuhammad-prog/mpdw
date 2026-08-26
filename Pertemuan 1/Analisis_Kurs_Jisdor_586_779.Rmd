@@ -1,0 +1,252 @@
+---
+title: "Analisis Deret Waktu Kurs JISDOR (Data NO 586 - 779)"
+subtitle: "Perbandingan Metode Pemulusan: SMA, DMA, SES, DES (Holt), dan Holt-Winters"
+author: "Muhammad Daffa Fadhilah Athif (M0401241085)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 9, fig.height = 5)
+```
+
+# Persiapan Data
+
+```{r libraries}
+# Paket yang digunakan
+library(readxl)    # membaca file excel
+library(dplyr)      # manipulasi data
+library(tidyr)       # reshape data untuk plotting
+library(ggplot2)    # visualisasi
+library(forecast)   # ses(), holt(), hw(), accuracy()
+library(TTR)          # SMA()
+library(knitr)          # kable() untuk tabel rapi
+```
+
+```{r import-data}
+library(readxl)
+library(dplyr)
+library(lubridate)
+
+path_file <- "C:\\Users\\ASUS\\Downloads\\Informasi Kurs Jisdor.xlsx"
+
+# col_types = "list" agar TIDAK ada nilai yang dipaksa jadi NA saat
+# readxl menebak tipe kolom Tanggal yang isinya campuran (teks & date)
+raw <- read_excel(path_file, skip = 4, col_types = "list")
+colnames(raw) <- c("NO", "Tanggal", "Kurs")
+
+# Fungsi untuk mem-parsing satu sel Tanggal, apapun bentuknya
+parse_tanggal <- function(x) {
+  if (length(x) == 0 || is.null(x) || (length(x) == 1 && is.na(x))) {
+    return(as.Date(NA))
+  }
+  if (inherits(x, "POSIXct") || inherits(x, "Date")) {
+    # Sel ini sudah dikonversi Excel jadi Date, TAPI bulan & harinya
+    # tertukar (karena tanggal ambigu dibaca sebagai DD/MM, bukan MM/DD).
+    # Tukar kembali ke posisi yang benar:
+    d <- as.Date(x)
+    as.Date(sprintf("%04d-%02d-%02d", year(d), day(d), month(d)))
+  } else if (is.character(x)) {
+    # Sel ini masih teks "M/D/YYYY ..." (tidak ambigu -> tidak tertukar)
+    as.Date(mdy(sub(" .*", "", trimws(x))))
+  } else {
+    as.Date(NA)
+  }
+}
+
+df <- raw %>%
+  mutate(
+    NO      = as.numeric(unlist(NO)),
+    Tanggal = as.Date(sapply(Tanggal, parse_tanggal), origin = "1970-01-01"),
+    Kurs    = as.numeric(unlist(Kurs))
+  ) %>%
+  filter(!is.na(NO))
+
+# Verifikasi: NO=1 harus 2022-08-01, NO=586 harus 2024-12-31
+df %>% filter(NO %in% c(1, 2, 13, 586, 779))
+```
+
+## Subset Data (NO 586 - 779)
+
+```{r subset-data}
+data_sub <- df %>%
+  filter(NO >= 586, NO <= 779) %>%
+  arrange(NO)
+
+cat("Jumlah observasi pada rentang NO 586-779:", nrow(data_sub), "\n")
+cat("Periode tanggal :", format(min(data_sub$Tanggal)), "s.d.", format(max(data_sub$Tanggal)), "\n")
+
+head(data_sub)
+tail(data_sub)
+```
+
+
+```{r plot-raw}
+ggplot(data_sub, aes(x = Tanggal, y = Kurs)) +
+  geom_line(color = "steelblue", linewidth = 0.7) +
+  labs(title = "Deret Waktu Kurs JISDOR (NO 586 - 779)",
+       x = "Tanggal", y = "Kurs (Rp/USD)") +
+  theme_minimal()
+```
+
+## Split Data
+```{r train-test-split}
+n        <- nrow(data_sub)
+n_test   <- round(0.2 * n)
+n_train  <- n - n_test
+
+train <- data_sub$Kurs[1:n_train]
+test  <- data_sub$Kurs[(n_train + 1):n]
+
+# Objek ts (frequency = 5 merepresentasikan 5 hari perdagangan per minggu,
+# dipakai khusus untuk model Holt-Winters musiman)
+train_ts <- ts(train, frequency = 5)
+
+cat("n_train =", n_train, " | n_test =", n_test, "\n")
+```
+
+# Penerapan Metode Pemulusan
+
+## Simple Moving Average (SMA)
+
+Orde `m` dipilih dengan mencari nilai yang meminimalkan SSE *in-sample* pada
+data latih (grid search m = 2 s.d. 10).
+
+```{r sma-order}
+sse_m <- sapply(2:10, function(m) {
+  fit <- SMA(train, n = m)
+  err <- train - fit
+  sum(err^2, na.rm = TRUE)
+})
+m_opt <- (2:10)[which.min(sse_m)]
+cat("Orde SMA optimal (SSE terkecil in-sample):", m_opt, "\n")
+```
+
+```{r sma}
+m <- m_opt
+
+sma_fit <- SMA(train, n = m)
+
+# Peramalan h-periode ke depan dengan SMA bersifat naif:
+# nilai pemulusan terakhir digunakan sebagai nilai konstan untuk seluruh
+# periode data uji.
+last_sma     <- tail(na.omit(sma_fit), 1)
+sma_forecast <- rep(as.numeric(last_sma), n_test)
+```
+
+## Double Moving Average (DMA)
+
+DMA mengakomodasi tren dengan menghitung pemulusan tingkat pertama (S') dan
+tingkat kedua (S''), lalu membentuk komponen level (`a_t`) dan slope (`b_t`).
+
+```{r dma}
+sma1 <- SMA(train, n = m)
+sma2 <- SMA(sma1,  n = m)
+
+at <- 2 * sma1 - sma2
+bt <- (2 / (m - 1)) * (sma1 - sma2)
+
+last_at <- as.numeric(tail(na.omit(at), 1))
+last_bt <- as.numeric(tail(na.omit(bt), 1))
+
+# Peramalan: F(t+k) = a_t + b_t * k
+dma_forecast <- last_at + last_bt * (1:n_test)
+```
+
+## Single Exponential Smoothing (SES)
+
+SES cocok untuk data tanpa tren/musiman yang jelas dan parameter `alpha`
+dioptimalkan otomatis oleh fungsi `ses()`.
+
+```{r ses}
+ses_fit      <- ses(train, h = n_test)
+ses_forecast <- as.numeric(ses_fit$mean)
+cat("Alpha optimum SES:", round(ses_fit$model$par["alpha"], 4), "\n")
+```
+
+## Double Exponential Smoothing / Metode Holt (DES)
+
+Metode Holt menambahkan komponen tren (level + trend) sehingga lebih sesuai
+untuk data yang memiliki kecenderungan naik/turun.
+
+```{r holt}
+holt_fit      <- holt(train, h = n_test)
+holt_forecast <- as.numeric(holt_fit$mean)
+cat("Alpha optimum:", round(holt_fit$model$par["alpha"], 4),
+    "| Beta optimum:", round(holt_fit$model$par["beta"], 4), "\n")
+```
+
+## Holt-Winters (Trend + Musiman)
+
+Diterapkan sebagai pembanding meskipun data harian kurs tidak menunjukkan pola
+musiman kuat; frekuensi musiman diasumsikan 5 (hari kerja per minggu).
+
+```{r hw}
+hw_fit      <- hw(train_ts, h = n_test, seasonal = "additive")
+hw_forecast <- as.numeric(hw_fit$mean)
+```
+
+# Perbandingan Kinerja Metode
+
+```{r metrics-function}
+calc_metrics <- function(actual, forecast) {
+  error <- actual - forecast
+  sse   <- sum(error^2)
+  mse   <- mean(error^2)
+  rmse  <- sqrt(mse)
+  mape  <- mean(abs(error / actual)) * 100
+  c(SSE = sse, MSE = mse, RMSE = rmse, MAPE = mape)
+}
+
+hasil <- rbind(
+  SMA          = calc_metrics(test, sma_forecast),
+  DMA          = calc_metrics(test, dma_forecast),
+  SES          = calc_metrics(test, ses_forecast),
+  `DES (Holt)` = calc_metrics(test, holt_forecast),
+  `Holt-Winters` = calc_metrics(test, hw_forecast)
+)
+
+kable(round(hasil, 3), caption = "Perbandingan Akurasi Metode Pemulusan pada Data Uji")
+```
+
+## Visualisasi Hasil Peramalan vs Data Aktual
+
+```{r plot-comparison}
+plot_df <- data.frame(
+  Index   = 1:n_test,
+  Aktual  = test,
+  SMA     = sma_forecast,
+  DMA     = dma_forecast,
+  SES     = ses_forecast,
+  DES     = holt_forecast,
+  HW      = hw_forecast
+)
+
+plot_long <- pivot_longer(plot_df, -Index, names_to = "Metode", values_to = "Nilai")
+
+ggplot(plot_long, aes(x = Index, y = Nilai, color = Metode, linetype = Metode == "Aktual")) +
+  geom_line(linewidth = 0.9) +
+  scale_linetype_manual(values = c(`TRUE` = "solid", `FALSE` = "dashed"), guide = "none") +
+  labs(title = "Perbandingan Hasil Peramalan Tiap Metode terhadap Data Aktual (Data Uji)",
+       x = "Periode ke- (data uji)", y = "Kurs (Rp/USD)", color = "Metode") +
+  theme_minimal()
+```
+# Penentuan Metode Terbaik
+
+```{r best-method}
+best_rmse <- rownames(hasil)[which.min(hasil[, "RMSE"])]
+best_mape <- rownames(hasil)[which.min(hasil[, "MAPE"])]
+
+cat("Metode dengan RMSE terkecil :", best_rmse, "\n")
+cat("Metode dengan MAPE terkecil :", best_mape, "\n")
+```
+
+Kesimpulannya, metode Holt-Winters dipilih sebagai metode pemulusan
+terbaik untuk data Kurs JISDOR pada rentang NO 586-779 karena memberikan
+akurasi peramalan (RMSE/MAPE) paling rendah dan paling sesuai dengan
+karakteristik data yang memiliki tren dan memiliki musiman.
