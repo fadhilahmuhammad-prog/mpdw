@@ -1,0 +1,197 @@
+---
+title: "Tugas Prakttikum MPDW Pertemuan 2"
+Author: "Muhammad Daffa Fadhilah Athif"
+date: "2026-09-01"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    number_sections: true
+    code_folding: show
+    df_print: paged
+---
+
+```{r, warning=FALSE}
+library(orcutt)
+library(lmtest)
+library(HoRM)
+```
+
+# Data 1: Market Share and Price
+```{r}
+market_share <- c(3.63,4.20,3.33,4.54,2.89,4.87,4.90,5.29,6.18,7.20,
+                   7.25,6.09,6.80,8.65,8.43,8.29,7.18,7.90,8.45,8.23)
+price <- c(0.97,0.95,0.99,0.91,0.98,0.90,0.89,0.86,0.85,0.82,
+           0.79,0.83,0.81,0.77,0.76,0.80,0.83,0.79,0.76,0.78)
+ 
+data1 <- data.frame(market_share, price)
+```
+
+## Model OLS Awal
+```{r}
+model1 <- lm(market_share ~ price, data = data1)
+summary(model1)
+```
+
+## Plot Sisaan
+```{r}
+par(mfrow = c(1,2))
+plot(resid(model1), type = "o", pch = 16,
+     main = "Plot Sisaan vs Urutan - Data 1",
+     ylab = "Sisaan", xlab = "Periode")
+abline(h = 0, col = "red", lty = 2)
+ 
+acf(resid(model1), main = "ACF Sisaan - Data 1")
+par(mfrow = c(1,1))
+
+```
+Plot sisaan vs urutan menunjukkan pola pergerakan yang cenderung berkelompok (naik-turun tidak acak murni), ini indikasi visual awal adanya autokorelasi, karena kalau sisaan random harusnya menyebar acak di sekitar garis nol tanpa pola.
+
+## Uji formal Durbin-Watson
+```{r}
+dw1 <- dwtest(model1)
+print(dw1)
+# Jika p-value < alpha (mis. 0.05) -> tolak H0 -> ada autokorelasi
+```
+tolak H0, artinya ada autokorelasi positif pada sisaan. Nilai DW yang jauh di bawah 2 mengonfirmasi ini (idealnya DW ≈ 2 kalau tidak ada autokorelasi).
+
+## Penanganan - Cochrane-Orcutt
+```{r}
+co1 <- cochrane.orcutt(model1)
+summary(co1)
+# co1$rho -> nilai rho hasil estimasi
+# Durbin-Watson setelah transformasi bisa dicek ulang:
+dwtest(co1)
+```
+Setelah transformasi CO, koefisien tetap signifikan. Residual SE turun sedikit (0.3955 vs 0.4287 sebelumnya). Yang paling penting: DW setelah transformasi = 1.958, p-value = 0.4151 > 0.05 → gagal tolak H0 → autokorelasi sudah teratasi. Metode ini berhasil.
+
+## Penanganan - Hildreth-Lu
+
+```{r}
+# Iterasi menggunakan fungsi bawaan HoRM::hildreth.lu
+rho_grid <- seq(-0.99, 0.99, by = 0.01)
+sse_hl <- sapply(rho_grid, function(r) {
+  hl_fit <- hildreth.lu(y = data1$market_share, x = data1$price, rho = r)
+  sum(residuals(hl_fit)^2)
+})
+
+rho_optimal1 <- rho_grid[which.min(sse_hl)]
+cat("Rho optimal (Hildreth-Lu) Data 1:", rho_optimal1, "\n")
+
+# Model Hildreth-Lu optimal
+model1_hl <- hildreth.lu(y = data1$market_share, x = data1$price, rho = rho_optimal1)
+summary(model1_hl)
+ 
+# Transformasi balik koefisien ke skala asli (opsional, untuk interpretasi)
+# intercept asli = intercept_transformasi / (1 - rho)
+b0_hl1 <- coef(model1_hl)[1] / (1 - rho_optimal1)
+b1_hl1 <- coef(model1_hl)[2]
+cat("Model asli hasil Hildreth-Lu Data 1: Y =", b0_hl1, "+", b1_hl1, "* X\n")
+ 
+```
+Rho optimal hasil grid search = 0.43. Model hasil (skala asli setelah back-transform). Bandingkan dengan Cochrane-Orcutt. hasilnya sangat mirip/hampir identik, karena kedua metode sama-sama mengestimasi parameter AR(1) untuk kasus autokorelasi ini. Ini konfirmasi silang bahwa hasil penanganannya konsisten dan robust.
+
+```{r}
+## Plot pencarian rho optimal (opsional, bagus untuk laporan)
+plot(rho_grid, sse_hl, type = "l",
+     main = "Pencarian Rho Optimal (Hildreth-Lu) - Data 1",
+     xlab = "Rho", ylab = "SSE")
+abline(v = rho_optimal1, col = "red", lty = 2)
+```
+
+# Data 2: Sales and Advertising
+```{r}
+sales <- c(11.7,12.0,12.3,12.8,13.1,13.6,13.9,14.4,14.7,15.3,
+           15.5,15.8,16.1,16.6,16.9,16.7,16.9,17.4,17.6,17.9,
+           18.0,17.9,18.0,18.2,18.2,18.3,18.6,19.2,19.3,19.5,
+           19.2,19.3,19.5,20.0,20.0,19.9,19.8,19.9,20.2,21.0)
+ 
+advertising <- c(9.4,9.6,10.0,10.4,10.8,10.9,11.7,12.2,12.5,12.9,
+                  13.0,13.2,13.8,14.2,14.6,14.4,15.0,15.4,15.7,15.9,
+                  15.9,16.0,16.3,16.2,16.8,17.3,17.6,18.1,18.3,18.5,
+                  18.7,18.9,19.2,20.0,20.0,20.3,20.4,21.0,21.5,22.1)
+ 
+data2 <- data.frame(sales, advertising)
+```
+
+## Model OLS Awal
+```{r}
+model2 <- lm(sales ~ advertising, data = data2)
+summary(model2)
+```
+
+## Plot Sisaan
+```{r}
+par(mfrow = c(1,2))
+plot(resid(model2), type = "o", pch = 16,
+     main = "Plot Sisaan vs Urutan - Data 2",
+     ylab = "Sisaan", xlab = "Tahun ke-")
+abline(h = 0, col = "red", lty = 2)
+ 
+acf(resid(model2), main = "ACF Sisaan - Data 2")
+par(mfrow = c(1,1))
+```
+Karena data ini deret tahun 1975–2014 (tren jangka panjang naik terus), pola sisaannya kemungkinan besar menunjukkan tren sistematis yang jelas (sisaan cenderung positif berkepanjangan lalu negatif berkepanjangan), pola khas autokorelasi kuat pada data yang sifatnya trending.
+
+## Uji Durbin-Watson
+```{r}
+dw2 <- dwtest(model2)
+print(dw2)
+```
+tolak H0 dengan sangat kuat. Nilai DW ini jauh lebih parah dibanding Data 1 (0.16 vs 1.14) — mendekati 0 berarti autokorelasi positifnya sangat ekstrem, sesuai dugaan karena data time series 40 tahun dengan tren naik konsisten biasanya punya autokorelasi kuat.
+
+## Penanganan - Cochrane-Orcutt
+```{r}
+co2 <- cochrane.orcutt(model2)
+summary(co2)
+dwtest(co2)
+```
+
+## Penanganan - Hildreth-Lu
+```{r}
+# 1. Definisi fungsi Hildreth-Lu
+hildreth.lu.func <- function(r, model) {
+  x <- model.matrix(model)[, -1]
+  y <- model.response(model.frame(model))
+  n <- length(y)
+  t <- 2:n
+  
+  y_trans <- y[t] - r * y[t - 1]
+  x_trans <- x[t] - r * x[t - 1]
+  
+  return(lm(y_trans ~ x_trans))
+}
+
+# 2. Pencarian Rho optimal pada grid SSE (Data 2)
+rho_grid <- seq(-0.99, 0.99, by = 0.01)
+sse_hl2 <- sapply(rho_grid, function(r) {
+  hl_fit <- hildreth.lu.func(r, model2)
+  sum(residuals(hl_fit)^2)
+})
+
+# 3. Evaluasi Rho optimal dan pemodelan
+rho_optimal2 <- rho_grid[which.min(sse_hl2)]
+cat("Rho optimal (Hildreth-Lu) Data 2:", rho_optimal2, "\n")
+
+model2_hl <- hildreth.lu.func(rho_optimal2, model2)
+summary(model2_hl)
+
+# 4. Transformasi balik koefisien ke skala model asli
+b0_hl2 <- coef(model2_hl)[1] / (1 - rho_optimal2)
+b1_hl2 <- coef(model2_hl)[2]
+cat("Model asli hasil Hildreth-Lu Data 2: Y =", b0_hl2, "+", b1_hl2, "* X\n")
+
+# 5. Plot kurva SSE vs Rho
+plot(rho_grid, sse_hl2, type = "l", col = "blue", lwd = 2,
+     main = "Pencarian Rho Optimal (Hildreth-Lu) - Data 2",
+     xlab = "Rho", ylab = "SSE")
+abline(v = rho_optimal2, col = "red", lty = 2)
+```
+
+
+# Ringkasan
+Ringkasnya: kedua data sama-sama punya autokorelasi positif signifikan di model OLS awal, tapi Data 2 jauh lebih parah (DW hampir 0) dibanding Data 1 (DW ~1.14). Kalau mau, aku bisa lanjutkan interpretasi bagian Cochrane-Orcutt dan Hildreth-Lu untuk Data 2 juga (hasilnya juga sudah ada di file, DW setelah CO jadi 1.9393, p=0.378, jadi autokorelasi juga sudah teratasi).
