@@ -1,0 +1,311 @@
+---
+title: "Jawaban Latihan - Regresi dengan Peubah Lag"
+subtitle: "Latihan 1 (Distributed Lag) & Latihan 2 (ARDL)"
+author: "Muhammad Daffa Fadhilah Athif"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    number_sections: true
+    code_folding: show
+    df_print: paged
+---
+
+## *Packages*
+
+```{r, message=FALSE, warning=FALSE}
+#install.packages("dLagM")
+#install.packages("dynlm")
+#install.packages("MLmetrics")
+library(dLagM)
+library(dynlm)
+library(MLmetrics)
+library(lmtest)
+library(car)
+```
+
+# Latihan 1 : Distributed Lag (Pangsa Pasar vs Harga)
+
+Data pangsa pasar (Y) dan harga (X) pasta gigi selama 20 periode.
+
+## Impor Data
+
+```{r}
+data1 <- data.frame(
+  Period = 1:20,
+  Y = c(3.63,4.20,3.33,4.54,2.89,4.87,4.90,5.29,6.18,7.20,
+        7.25,6.09,6.80,8.65,8.43,8.29,7.18,7.90,8.45,8.23),
+  X = c(0.97,0.95,0.99,0.91,0.98,0.90,0.89,0.86,0.85,0.82,
+        0.79,0.83,0.81,0.77,0.76,0.80,0.83,0.79,0.76,0.78)
+)
+str(data1)
+data1
+```
+
+## Pembagian Data
+
+Data dibagi menjadi *train* (75%, periode 1-15) dan *test* (25%, periode 16-20), mengikuti alur pada modul.
+
+```{r}
+train1 <- data1[1:15, ]
+test1  <- data1[16:20, ]
+
+train1.ts <- ts(train1)
+test1.ts  <- ts(test1)
+data1.ts  <- ts(data1)
+```
+
+## Model Koyck
+
+Model Koyck mengasumsikan pengaruh $X$ terhadap $Y$ meluruh secara geometris seiring bertambahnya lag, sehingga direpresentasikan lewat $Y_{t-1}$.
+
+```{r}
+model.koyck1 <- koyckDlm(x = train1$X, y = train1$Y)
+summary(model.koyck1)
+AIC(model.koyck1)
+BIC(model.koyck1)
+```
+
+Dari output di atas, intercept dan $X_t$ signifikan pada taraf nyata 5% ($p<0{,}05$), sedangkan $Y_{t-1}$ tidak signifikan ($p>0{,}05$) — mengindikasikan efek harga terhadap pangsa pasar sebagian besar terjadi pada periode berjalan. Model yang terbentuk kurang lebih:
+
+$$
+\hat{Y}_t = 25{,}30 - 22{,}76X_t + 0{,}03Y_{t-1}
+$$
+
+### Peramalan & Akurasi
+
+```{r}
+fore.koyck1 <- forecast(model = model.koyck1, x = test1$X, h = 5)
+fore.koyck1
+mape.koyck1 <- MAPE(fore.koyck1$forecasts, test1$Y)
+mape.koyck1
+GoF(model.koyck1)
+```
+
+## Regression with Distributed Lag (Lag = 1)
+
+```{r}
+model.dlm1 <- dlm(x = train1$X, y = train1$Y, q = 1)
+summary(model.dlm1)
+AIC(model.dlm1)
+BIC(model.dlm1)
+```
+
+```{r}
+fore.dlm1 <- forecast(model = model.dlm1, x = test1$X, h = 5)
+fore.dlm1
+mape.dlm1 <- MAPE(fore.dlm1$forecasts, test1$Y)
+mape.dlm1
+GoF(model.dlm1)
+```
+
+## Pencarian *Lag* Optimum
+
+```{r}
+finiteDLMauto(formula = Y ~ X,
+              data = data.frame(train1), q.min = 1, q.max = 10,
+              model.type = "dlm", error.type = "AIC", trace = TRUE)
+```
+
+Pencarian AIC memilih lag optimum pada **q = 6**. Model tersebut kemudian diestimasi ulang:
+
+```{r}
+model.dlm1.opt <- dlm(x = train1$X, y = train1$Y, q = 6)
+summary(model.dlm1.opt)
+AIC(model.dlm1.opt)
+BIC(model.dlm1.opt)
+```
+
+> Catatan: karena jumlah amatan *train* relatif kecil (15 periode), model dengan lag=6 hanya menyisakan sedikit derajat bebas sehingga rawan *overfitting*. Hasil ini tetap ditampilkan karena dipilih murni berdasarkan kriteria AIC, namun perlu kehati-hatian dalam interpretasi maupun generalisasi ke data baru.
+
+### Peramalan & Akurasi
+
+```{r}
+fore.dlm1.opt <- forecast(model = model.dlm1.opt, x = test1$X, h = 5)
+fore.dlm1.opt
+mape.dlm1.opt <- MAPE(fore.dlm1.opt$forecasts, test1$Y)
+mape.dlm1.opt
+GoF(model.dlm1.opt)
+```
+
+## Perbandingan Model & Kesimpulan Latihan 1
+
+```{r}
+akurasi1 <- matrix(c(mape.koyck1, mape.dlm1, mape.dlm1.opt))
+row.names(akurasi1) <- c("Koyck", "DLM (q=1)", "DLM (q=6, optimum)")
+colnames(akurasi1) <- "MAPE"
+akurasi1
+```
+
+Berdasarkan nilai MAPE data uji, **model DLM dengan lag optimum (q = 6)** memberikan MAPE terendah, diikuti oleh model Koyck, sementara DLM (q = 1) memiliki MAPE tertinggi. Dengan mempertimbangkan trade-off antara akurasi dan risiko *overfitting* pada model lag=6, **model Koyck** juga layak dipertimbangkan sebagai model yang lebih sederhana dan stabil (hanya 2 peubah bebas) dengan akurasi yang mendekati model lag optimum. Secara keseluruhan, model distributed lag terbaik untuk data ini dipilih **DLM (q = 6)** berdasarkan kriteria AIC dan MAPE, dengan catatan keterbatasan jumlah data.
+
+### Plot Perbandingan
+
+```{r}
+plot(test1$X, test1$Y, type = "b", col = "black", ylim = c(5,9),
+     xlab = "Harga (X)", ylab = "Pangsa Pasar (Y)")
+points(test1$X, fore.koyck1$forecasts, col = "red");   lines(test1$X, fore.koyck1$forecasts, col = "red")
+points(test1$X, fore.dlm1$forecasts, col = "blue");    lines(test1$X, fore.dlm1$forecasts, col = "blue")
+points(test1$X, fore.dlm1.opt$forecasts, col = "orange"); lines(test1$X, fore.dlm1.opt$forecasts, col = "orange")
+legend("topright", c("Aktual", "Koyck", "DLM (q=1)", "DLM (q=6)"),
+       lty = 1, col = c("black","red","blue","orange"), cex = 0.8)
+```
+
+---
+
+# Latihan 2 : ARDL (Sales vs Advertising)
+
+Data tahunan *Sales* (Y) dan *Advertising* (X) periode 1975-2014 (40 tahun).
+
+## Impor Data
+
+```{r}
+data2 <- data.frame(
+  Year = 1975:2014,
+  Y = c(11.7,12.0,12.3,12.8,13.1,13.6,13.9,14.4,14.7,15.3,
+        15.5,15.8,16.1,16.6,16.9,16.7,16.9,17.4,17.6,17.9,
+        18.0,17.9,18.0,18.2,18.2,18.3,18.6,19.2,19.3,19.5,
+        19.2,19.3,19.5,20.0,20.0,19.9,19.8,19.9,20.2,21.0),
+  X = c(9.4,9.6,10.0,10.4,10.8,10.9,11.7,12.2,12.5,12.9,
+        13.0,13.2,13.8,14.2,14.6,14.4,15.0,15.4,15.7,15.9,
+        15.9,16.0,16.3,16.2,16.8,17.3,17.6,18.1,18.3,18.5,
+        18.7,18.9,19.2,20.0,20.0,20.3,20.4,21.0,21.5,22.1)
+)
+str(data2)
+```
+
+## Pembagian Data
+
+*Train* = 1975-2004 (30 tahun), *test* = 2005-2014 (10 tahun).
+
+```{r}
+train2 <- data2[1:30, ]
+test2  <- data2[31:40, ]
+
+train2.ts <- ts(train2)
+test2.ts  <- ts(test2)
+data2.ts  <- ts(data2)
+```
+
+## Model ARDL(p = 1, q = 1)
+
+Sebagai model awal, digunakan ARDL dengan $p=1$ (lag $X$) dan $q=1$ (lag $Y$), mengikuti alur pada modul.
+
+```{r}
+model.ardl2 <- ardlDlm(formula = Y ~ X, data = train2, p = 1, q = 1)
+summary(model.ardl2)
+AIC(model.ardl2)
+BIC(model.ardl2)
+```
+
+Hasil uji-t menunjukkan bahwa $X_t$ dan $Y_{t-1}$ signifikan ($p<0{,}05$), sedangkan $X_{t-1}$ tidak signifikan. Model keseluruhan:
+
+$$
+\hat{Y}_t = 1{,}56 + 0{,}29X_t - 0{,}10X_{t-1} + 0{,}74Y_{t-1}
+$$
+
+### Peramalan & Akurasi
+
+```{r}
+fore.ardl2 <- forecast(model = model.ardl2, x = test2$X, h = 10)
+fore.ardl2
+mape.ardl2 <- MAPE(fore.ardl2$forecasts, test2$Y)
+mape.ardl2
+GoF(model.ardl2)
+```
+
+## Pencarian Orde (p,q) Optimum
+
+```{r}
+model.ardl2.opt <- ardlBoundOrders(data = data.frame(train2), ic = "AIC",
+                                    formula = Y ~ X)
+model.ardl2.opt
+
+min_p <- c()
+for (i in 1:6) {
+  min_p[i] <- min(model.ardl2.opt$Stat.table[[i]])
+}
+q_opt <- which(min_p == min(min_p, na.rm = TRUE))
+p_opt <- which(model.ardl2.opt$Stat.table[[q_opt]] ==
+                 min(model.ardl2.opt$Stat.table[[q_opt]], na.rm = TRUE))
+data.frame("q_optimum" = q_opt, "p_optimum" = p_opt,
+           "AIC" = model.ardl2.opt$min.Stat)
+```
+
+Berdasarkan hasil penelusuran AIC, model **tidak memerlukan lag tambahan pada $X$** ($p=0$) dan cukup dengan **satu lag pada $Y$** ($q=1$) — konsisten dengan koefisien $X_{t-1}$ yang tidak signifikan pada model ARDL(1,1) sebelumnya. Karena fungsi `ardlDlm()` mensyaratkan $p\geq1$, model ARDL(0,1) diestimasi menggunakan `dynlm::dynlm()` dengan menghilangkan suku `L(X)`.
+
+```{r}
+model.ardl2.final <- dynlm(Y ~ X + L(Y), data = train2.ts)
+summary(model.ardl2.final)
+AIC(model.ardl2.final)
+BIC(model.ardl2.final)
+```
+
+Model ARDL(0,1) yang terbentuk:
+
+$$
+\hat{Y}_t = 1{,}72 + 0{,}22X_t + 0{,}71Y_{t-1}
+$$
+
+Model ini memiliki AIC/BIC lebih rendah (lebih baik) dibanding ARDL(1,1) sekaligus lebih sederhana (parsimoni), sehingga dipilih sebagai kandidat model terbaik.
+
+### Peramalan & Akurasi Model ARDL(0,1)
+
+Karena diestimasi via `dynlm`, peramalan dilakukan secara manual/rekursif untuk data uji.
+
+```{r}
+coef.final <- coef(model.ardl2.final)
+y_prev <- tail(train2$Y, 1)
+fore.final <- numeric(nrow(test2))
+for (i in seq_len(nrow(test2))) {
+  fore.final[i] <- coef.final["(Intercept)"] +
+    coef.final["X"] * test2$X[i] +
+    coef.final["L(Y)"] * y_prev
+  y_prev <- fore.final[i]
+}
+fore.final
+mape.ardl2.final <- MAPE(fore.final, test2$Y)
+mape.ardl2.final
+```
+
+## Uji Diagnostik Model Terbaik (ARDL(0,1))
+
+```{r}
+dwtest(model.ardl2.final)     # autokorelasi
+bptest(model.ardl2.final)     # heteroskedastisitas
+shapiro.test(residuals(model.ardl2.final))  # normalitas
+```
+
+-   Jika p-value \> 0.05 pada `dwtest`/`bptest`/`shapiro.test` di atas → tidak ada autokorelasi/heteroskedastisitas, dan residual berdistribusi normal (asumsi terpenuhi).
+
+## Perbandingan Model & Kesimpulan Latihan 2
+
+```{r}
+akurasi2 <- matrix(c(mape.ardl2, mape.ardl2.final))
+row.names(akurasi2) <- c("ARDL(1,1)", "ARDL(0,1) - optimum")
+colnames(akurasi2) <- "MAPE"
+akurasi2
+```
+
+Kedua model memiliki MAPE yang sangat dekat (di bawah 5%, mengindikasikan akurasi peramalan yang sangat baik), namun **ARDL(0,1)** memiliki AIC/BIC terendah dan struktur yang lebih sederhana (tidak menyertakan lag $X$ yang tidak signifikan). Oleh karena itu, **model ARDL(0,1)**:
+
+$$
+\hat{Y}_t = 1{,}72 + 0{,}22X_t + 0{,}71Y_{t-1}
+$$
+
+dipilih sebagai **model ARDL terbaik** untuk memodelkan *Sales* terhadap *Advertising* pada data ini.
+
+### Plot Perbandingan
+
+```{r}
+plot(test2$Year, test2$Y, type = "b", col = "black", ylim = c(18,22),
+     xlab = "Tahun", ylab = "Sales (Y)")
+points(test2$Year, fore.ardl2$forecasts, col = "red");  lines(test2$Year, fore.ardl2$forecasts, col = "red")
+points(test2$Year, fore.final, col = "blue");            lines(test2$Year, fore.final, col = "blue")
+legend("topleft", c("Aktual", "ARDL(1,1)", "ARDL(0,1)"),
+       lty = 1, col = c("black","red","blue"), cex = 0.8)
+```
