@@ -1,0 +1,502 @@
+---
+title: "Pemodelan dan Peramalan Kurs JISDOR dengan ARIMA (Box-Jenkins)"
+subtitle: "Studi Kasus: 100 Data Pertama Kurs JISDOR (1 Agustus - 19 Desember 2022)"
+author: "Muhammad Daffa Fadhilah Athif"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    theme: readable
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE,
+  fig.align = "center", fig.width = 8, fig.height = 4.5
+)
+options(scipen = 999, digits = 6)
+```
+
+# Persiapan
+
+## *Library*
+
+```{r library}
+library(readxl)    # membaca file Excel
+library(forecast)  # Arima, auto.arima, forecast, accuracy
+library(tseries)   # adf.test, kpss.test, jarque.bera.test
+library(lmtest)    # coeftest (uji signifikansi parameter)
+library(ggplot2)   # grafik
+library(knitr)     # tabel rapi
+```
+
+## Input Data
+
+File Excel memiliki judul dan baris kosong di bagian atas, sehingga baris header (yang berisi kolom `NO`, `Tanggal`, `Kurs`) dicari secara otomatis terlebih dahulu.
+
+```{r input}
+# Ubah path berikut sesuai lokasi file di komputer
+file_data <- "C:\\Users\\ASUS\\Downloads\\Informasi Kurs Jisdor.xlsx"
+
+# Baca tanpa header, lalu cari baris yang berisi "NO"
+mentah   <- read_excel(file_data, col_names = FALSE)
+baris_hd <- which(mentah[[1]] == "NO")[1]
+
+data_all <- read_excel(file_data, skip = baris_hd)[, 1:3]
+colnames(data_all) <- c("NO", "Tanggal", "Kurs")
+
+# Ubah format tanggal (contoh: "8/1/2022 12:00:00 AM")
+Sys.setlocale("LC_TIME", "C")
+if (is.character(data_all$Tanggal)) {
+  data_all$Tanggal <- as.Date(as.POSIXct(data_all$Tanggal,
+                              format = "%m/%d/%Y %I:%M:%S %p", tz = "UTC"))
+} else {
+  data_all$Tanggal <- as.Date(data_all$Tanggal)
+}
+data_all$Kurs <- as.numeric(data_all$Kurs)
+
+cat("Jumlah seluruh data di file:", nrow(data_all), "pengamatan\n")
+```
+
+## Mengambil 100 Data Pertama
+
+```{r data100}
+dat <- head(data_all, 100)
+
+cat("Jumlah data yang dianalisis :", nrow(dat), "\n")
+cat("Periode                     :", format(min(dat$Tanggal)), "s.d.", format(max(dat$Tanggal)), "\n")
+cat("Jumlah data hilang (NA)     :", sum(is.na(dat$Kurs)), "\n")
+
+head(dat, 10)
+```
+
+**Interpretasi.** Data yang dianalisis terdiri dari 100 pengamatan harian kurs JISDOR, mulai 1 Agustus 2022 sampai 19 Desember 2022. Tidak ada data yang hilang (*missing value*), sehingga data dapat langsung dianalisis tanpa proses imputasi. Data hanya mencakup hari kerja sehingga indeks waktunya diperlakukan sebagai urutan pengamatan 1, 2, ..., 100.
+
+```{r ts-object}
+y <- ts(dat$Kurs)   # objek time series (indeks = urutan pengamatan)
+```
+
+# Eksplorasi Data
+
+## Statistik Deskriptif
+
+```{r deskriptif}
+desk <- data.frame(
+  Statistik = c("Banyak data", "Minimum", "Kuartil 1", "Median", "Rata-rata",
+                "Kuartil 3", "Maksimum", "Simpangan baku"),
+  Nilai = c(length(y), min(y), quantile(y, .25), median(y), mean(y),
+            quantile(y, .75), max(y), sd(y))
+)
+kable(desk, digits = 2, caption = "Statistik deskriptif kurs JISDOR (Rp/USD)")
+```
+
+**Interpretasi.** Kurs JISDOR pada 100 hari pertama berkisar antara Rp14.688 (minimum) sampai Rp15.742 (maksimum) per dolar AS, dengan rata-rata sekitar Rp15.279 dan simpangan baku sekitar Rp348. Selisih antara nilai maksimum dan minimum sekitar Rp1.054 menunjukkan bahwa rupiah cukup bergerak pada periode ini. Nilai median (Rp15.328) yang sedikit lebih tinggi dari rata-rata mengindikasikan bahwa sebaran data agak condong ke kiri.
+
+## Plot Data Deret Waktu
+
+```{r plot-data}
+ggplot(dat, aes(x = Tanggal, y = Kurs)) +
+  geom_line(color = "steelblue", linewidth = 0.8) +
+  geom_point(size = 0.8, color = "steelblue") +
+  labs(title = "Kurs JISDOR (100 Data Pertama)",
+       x = "Tanggal", y = "Kurs (Rp/USD)") +
+  theme_minimal()
+```
+
+**Interpretasi.** Secara visual, data kurs memiliki **tren naik** (rupiah melemah terhadap dolar AS) dari sekitar Rp14.800-an pada awal Agustus hingga sekitar Rp15.600-an pada Desember 2022. Rata-rata data tidak konstan sepanjang waktu, melainkan bergerak naik mengikuti tren. Ini merupakan indikasi awal bahwa data **belum stasioner dalam rata-rata**. Hal ini perlu dibuktikan lebih lanjut dengan plot ACF/PACF dan uji formal.
+
+# Identifikasi Model
+
+## Uji Kestasioneran Data Asli (Level)
+
+ARIMA mensyaratkan data stasioner. Kestasioneran diperiksa dengan tiga cara: plot ACF, uji ADF, dan uji KPSS.
+
+### Plot ACF dan PACF Data Asli
+
+```{r acf-pacf-level, fig.height=4}
+par(mfrow = c(1, 2))
+acf(y,  lag.max = 24, main = "ACF Data Asli")
+pacf(y, lag.max = 24, main = "PACF Data Asli")
+par(mfrow = c(1, 1))
+```
+
+**Interpretasi.** Plot ACF pada data asli turun sangat lambat (*dies down slowly*) dan nilai autokorelasinya tetap besar serta signifikan (di luar batas garis biru putus-putus) sampai lag yang jauh. Pola ini merupakan ciri khas data yang **tidak stasioner** (mengandung tren). Sementara itu, PACF terputus setelah lag 1 dengan nilai yang sangat tinggi (mendekati 1).
+
+### Uji ADF (*Augmented Dickey-Fuller*)
+
+Hipotesis:
+
+- $H_0$: data tidak stasioner (memiliki akar unit)
+- $H_1$: data stasioner
+
+Kriteria: tolak $H_0$ jika $p\text{-value} < 0{,}05$.
+
+```{r adf-level}
+adf_level <- adf.test(y)
+adf_level
+```
+
+**Interpretasi.** Diperoleh statistik uji Dickey-Fuller sebesar `r round(adf_level$statistic, 4)` dengan $p\text{-value}$ = `r round(adf_level$p.value, 4)`. Karena $p\text{-value} > 0{,}05$, maka $H_0$ **gagal ditolak**. Artinya, pada taraf signifikansi 5% data kurs asli **tidak stasioner**.
+
+### Uji KPSS (*Kwiatkowski-Phillips-Schmidt-Shin*)
+
+Hipotesis pada KPSS **berkebalikan** dengan ADF:
+
+- $H_0$: data stasioner
+- $H_1$: data tidak stasioner
+
+```{r kpss-level}
+kpss_level <- kpss.test(y, null = "Level")
+kpss_level
+```
+
+**Interpretasi.** Nilai statistik KPSS sebesar `r round(kpss_level$statistic, 4)` dengan $p\text{-value}$ = `r kpss_level$p.value` (nilai tabel paling kecil yang dilaporkan adalah 0,01). Karena $p\text{-value} < 0{,}05$, maka $H_0$ **ditolak**, sehingga data tidak stasioner. Hasil ini **konsisten dengan uji ADF**. Kedua uji sepakat bahwa data asli belum stasioner, sehingga perlu dilakukan *differencing*.
+
+```{r ndiffs}
+cat("Banyaknya differencing yang disarankan (ndiffs, uji ADF):", ndiffs(y, test = "adf"), "\n")
+```
+
+## *Differencing* Orde Pertama ($d = 1$)
+
+Karena data tidak stasioner, dilakukan *differencing* orde 1:
+
+$$\nabla Y_t = Y_t - Y_{t-1}$$
+
+```{r diff1}
+dy <- diff(y, differences = 1)
+
+plot(dy, type = "l", col = "firebrick", lwd = 1.5,
+     main = "Data Hasil Differencing Orde 1",
+     xlab = "Pengamatan ke-", ylab = expression(Y[t] - Y[t-1]))
+abline(h = mean(dy), lty = 2)
+```
+
+**Interpretasi.** Setelah *differencing* orde 1, tren naik sudah hilang dan data berfluktuasi di sekitar rata-rata yang relatif konstan (garis putus-putus). Secara visual, data sudah tampak stasioner dalam rata-rata. Variansinya juga terlihat cukup stabil, meskipun ada beberapa lonjakan yang lebih besar dibanding yang lain.
+
+### Uji ADF dan KPSS Setelah *Differencing*
+
+```{r stasioner-diff}
+adf_diff  <- adf.test(dy)
+kpss_diff <- kpss.test(dy, null = "Level")
+adf_diff
+kpss_diff
+```
+
+**Interpretasi.**
+
+- **Uji ADF:** statistik = `r round(adf_diff$statistic, 4)` dan $p\text{-value}$ = `r adf_diff$p.value` ($< 0{,}05$), sehingga $H_0$ ditolak. Data hasil *differencing* **stasioner**.
+- **Uji KPSS:** statistik = `r round(kpss_diff$statistic, 4)` dan $p\text{-value}$ = `r kpss_diff$p.value` ($> 0{,}05$), sehingga $H_0$ gagal ditolak. Data hasil *differencing* **stasioner**.
+
+Kedua uji menghasilkan kesimpulan yang sama, yaitu data sudah stasioner setelah *differencing* satu kali. Dengan demikian, orde *differencing* yang digunakan adalah **$d = 1$**.
+
+## Plot ACF dan PACF Data Hasil *Differencing*
+
+Plot ACF dan PACF digunakan untuk menentukan orde $p$ (AR) dan $q$ (MA).
+
+```{r acf-pacf-diff, fig.height=4}
+par(mfrow = c(1, 2))
+acf(dy,  lag.max = 24, main = "ACF Differencing 1")
+pacf(dy, lag.max = 24, main = "PACF Differencing 1")
+par(mfrow = c(1, 1))
+```
+
+```{r acf-nilai}
+batas <- 1.96 / sqrt(length(dy))
+tab_acf <- data.frame(
+  Lag  = 1:10,
+  ACF  = round(acf(dy,  plot = FALSE, lag.max = 10)$acf[-1], 4),
+  PACF = round(pacf(dy, plot = FALSE, lag.max = 10)$acf[1:10], 4)
+)
+tab_acf$`Signifikan?` <- ifelse(abs(tab_acf$ACF) > batas | abs(tab_acf$PACF) > batas, "Ya", "Tidak")
+cat("Batas signifikansi ACF/PACF = +/-", round(batas, 4), "\n")
+kable(tab_acf, caption = "Nilai ACF dan PACF data hasil differencing")
+```
+
+**Interpretasi.** Dengan batas signifikansi sekitar $\pm 0{,}197$, ACF dan PACF pada data hasil *differencing* hampir seluruhnya berada di dalam batas. Hanya ada satu nilai yang sedikit melewati batas, yaitu PACF pada lag 2 (sekitar $-0{,}20$). Artinya, autokorelasi pada data sudah sangat lemah setelah *differencing*. Pola yang muncul kurang tegas, sehingga model yang dicurigai cukup sederhana, misalnya:
+
+- **ARIMA(0,1,1):** ACF cenderung terpotong setelah lag 1 (ada nilai positif di lag 1 sekitar 0,17).
+- **ARIMA(1,1,0)** dan **ARIMA(2,1,0):** PACF cenderung signifikan pada lag awal.
+- **ARIMA(1,1,1)**, **ARIMA(0,1,2)**, **ARIMA(2,1,1)**, **ARIMA(1,1,2)**, dan **ARIMA(2,1,2):** sebagai model campuran pembanding.
+
+Karena identifikasi visual bersifat subjektif, beberapa model kandidat di atas dibandingkan pada tahap berikutnya.
+
+## Model Kandidat
+
+```{r kandidat}
+kandidat <- list(c(1,1,0), c(0,1,1), c(1,1,1), c(2,1,0),
+                 c(0,1,2), c(2,1,1), c(1,1,2), c(2,1,2))
+nama_mod <- sapply(kandidat, function(o) sprintf("ARIMA(%d,%d,%d)", o[1], o[2], o[3]))
+nama_mod
+```
+
+# Estimasi Parameter dan Uji Signifikansi
+
+Estimasi parameter dilakukan dengan metode *Maximum Likelihood*. Hipotesis uji signifikansi parameter (uji-$z$):
+
+- $H_0$: parameter $= 0$ (tidak signifikan)
+- $H_1$: parameter $\neq 0$ (signifikan)
+
+```{r estimasi}
+model_list <- lapply(kandidat, function(o) Arima(y, order = o, method = "ML"))
+names(model_list) <- nama_mod
+
+for (nm in nama_mod) {
+  cat("\n=========", nm, "=========\n")
+  print(coeftest(model_list[[nm]]))
+}
+```
+
+```{r ringkas-signif}
+ringkas <- do.call(rbind, lapply(nama_mod, function(nm) {
+  ct <- coeftest(model_list[[nm]])
+  data.frame(Model = nm,
+             `Jumlah parameter` = nrow(ct),
+             `Parameter signifikan` = sum(ct[, 4] < 0.05),
+             `Semua signifikan?` = ifelse(all(ct[, 4] < 0.05), "Ya", "Tidak"),
+             check.names = FALSE)
+}))
+kable(ringkas, caption = "Rekapitulasi signifikansi parameter (alpha = 5%)")
+```
+
+**Interpretasi.** Dari delapan model kandidat, hanya **ARIMA(0,1,1)** yang seluruh parameternya signifikan pada taraf 5%. Koefisien MA(1) sebesar 0,2459 dengan $p\text{-value}$ = 0,0207 ($< 0{,}05$). Pada model lain, ada parameter yang tidak signifikan. Misalnya, ARIMA(1,1,0) memiliki AR(1) dengan $p\text{-value}$ = 0,0656 dan ARIMA(2,1,0) memiliki AR(2) dengan $p\text{-value}$ = 0,0625, keduanya sedikit di atas 0,05. Pada model campuran seperti ARIMA(1,1,1), tidak ada parameter yang signifikan. Model yang parameternya tidak signifikan kurang layak digunakan karena mengandung parameter yang sebenarnya tidak berkontribusi terhadap model.
+
+# Pemilihan Model Terbaik
+
+Model terbaik dipilih berdasarkan kriteria informasi **AIC** dan **BIC** (semakin kecil semakin baik), dengan mempertimbangkan signifikansi parameter dan prinsip parsimoni (model sederhana lebih diutamakan).
+
+```{r pilih-model}
+perbandingan <- data.frame(
+  Model = nama_mod,
+  AIC   = sapply(model_list, AIC),
+  AICc  = sapply(model_list, function(m) m$aicc),
+  BIC   = sapply(model_list, BIC),
+  Sigma2 = sapply(model_list, function(m) m$sigma2),
+  row.names = NULL
+)
+perbandingan <- perbandingan[order(perbandingan$BIC), ]
+kable(perbandingan, digits = 2, row.names = FALSE,
+      caption = "Perbandingan model kandidat (diurutkan berdasarkan BIC)")
+```
+
+```{r auto-arima}
+# Pembanding: pencarian model otomatis
+model_auto <- auto.arima(y, stepwise = FALSE, approximation = FALSE)
+model_auto
+```
+
+**Interpretasi.** Nilai AIC ARIMA(0,1,1) adalah 1067,65 dan nilai BIC-nya adalah 1072,84. Nilai BIC ini **paling kecil** di antara semua kandidat. Untuk AIC, ARIMA(2,1,0) memang sedikit lebih kecil (1067,60), tetapi selisihnya hanya sekitar 0,05, sehingga secara praktis keduanya setara, dan parameter AR(2) pada ARIMA(2,1,0) tidak signifikan. Fungsi `auto.arima()` juga memilih **ARIMA(0,1,1)**. Dengan mempertimbangkan (1) BIC terkecil, (2) seluruh parameter signifikan, (3) jumlah parameter paling sedikit (parsimoni), dan (4) kesesuaian dengan hasil `auto.arima()`, maka model terbaik yang dipilih adalah:
+
+$$\textbf{ARIMA(0,1,1)}$$
+
+## Model Terpilih
+
+```{r model-final}
+fit <- Arima(y, order = c(0, 1, 1), method = "ML")
+summary(fit)
+```
+
+```{r model-final-coef}
+theta <- coef(fit)["ma1"]
+cat("Koefisien MA(1) (theta) =", round(theta, 4), "\n")
+cat("Varians residual (sigma^2) =", round(fit$sigma2, 2), "\n")
+```
+
+**Persamaan model.** Karena $d=1$ dan $q=1$, model ARIMA(0,1,1) dapat ditulis:
+
+$$\nabla Y_t = \varepsilon_t + 0{,}2459\,\varepsilon_{t-1}$$
+
+atau dalam bentuk nilai kurs:
+
+$$Y_t = Y_{t-1} + \varepsilon_t + 0{,}2459\,\varepsilon_{t-1}$$
+
+**Interpretasi.** Kurs hari ini sama dengan kurs kemarin ($Y_{t-1}$) ditambah galat (*error*) hari ini ($\varepsilon_t$) dan sebagian kecil galat kemarin ($0{,}2459\,\varepsilon_{t-1}$). Koefisien MA positif berarti jika kemarin terjadi kejutan (*shock*) yang menaikkan kurs, sebagian pengaruhnya masih terbawa ke hari ini. Nilai 0,2459 relatif kecil, sehingga pergerakan kurs lebih didominasi oleh kurs hari sebelumnya dan galat hari ini. Ini sesuai dengan sifat kurs yang mendekati *random walk*.
+
+# Diagnostik Model
+
+Model yang baik harus memenuhi asumsi residual: **(1)** tidak ada autokorelasi (*white noise*), **(2)** berdistribusi normal, dan **(3)** variansi konstan (homoskedastis).
+
+## Plot Residual
+
+```{r residual-plot, fig.height=6}
+res <- residuals(fit)
+checkresiduals(fit, plot = TRUE, test = FALSE)
+```
+
+**Interpretasi.** Residual berfluktuasi di sekitar nol tanpa pola tren yang jelas. Plot ACF residual hampir seluruhnya berada di dalam batas signifikansi, yang menandakan tidak ada autokorelasi tersisa. Histogram residual tampak agak runcing di tengah dengan ekor yang cukup panjang dibanding kurva normal, yang mengindikasikan adanya beberapa nilai residual ekstrem.
+
+## Uji Autokorelasi Residual (Ljung-Box)
+
+- $H_0$: residual tidak berautokorelasi (*white noise*)
+- $H_1$: residual berautokorelasi
+
+```{r ljung}
+lb10 <- Box.test(res, lag = 10, type = "Ljung-Box", fitdf = 1)
+lb20 <- Box.test(res, lag = 20, type = "Ljung-Box", fitdf = 1)
+lb_tab <- data.frame(Lag = c(10, 20),
+                     `Chi-square` = c(lb10$statistic, lb20$statistic),
+                     df = c(lb10$parameter, lb20$parameter),
+                     `p-value` = c(lb10$p.value, lb20$p.value),
+                     check.names = FALSE)
+kable(lb_tab, digits = 4, caption = "Uji Ljung-Box pada residual")
+```
+
+**Interpretasi.** Pada lag 10 diperoleh $p\text{-value}$ = `r round(lb10$p.value, 4)` dan pada lag 20 diperoleh $p\text{-value}$ = `r round(lb20$p.value, 4)`. Keduanya jauh di atas 0,05, sehingga $H_0$ **gagal ditolak**. Residual bersifat *white noise* (tidak ada autokorelasi), sehingga **asumsi independensi residual terpenuhi**. Ini berarti model sudah cukup menangkap struktur autokorelasi dalam data.
+
+## Uji Normalitas Residual
+
+- $H_0$: residual berdistribusi normal
+- $H_1$: residual tidak berdistribusi normal
+
+```{r normalitas}
+sw <- shapiro.test(as.numeric(res))
+jb <- jarque.bera.test(as.numeric(res))
+sw
+jb
+
+qqnorm(res, main = "Normal Q-Q Plot Residual", pch = 19, cex = 0.7)
+qqline(res, col = "red", lwd = 2)
+```
+
+**Interpretasi.** Uji Shapiro-Wilk menghasilkan $p\text{-value}$ = `r signif(sw$p.value, 3)` dan uji Jarque-Bera menghasilkan $p\text{-value}$ < 0,05. Keduanya menolak $H_0$, sehingga **residual tidak berdistribusi normal**. Q-Q plot memperkuat hal ini, karena titik-titik di bagian ujung menyimpang dari garis normal (ekor distribusi lebih berat). Hal ini kemungkinan disebabkan oleh beberapa pengamatan dengan pergerakan kurs yang sangat besar dalam sehari (*outlier*). Pelanggaran normalitas ini dicatat sebagai **keterbatasan model**. Pengaruhnya terutama pada ketepatan selang kepercayaan peramalan, bukan pada nilai ramalan titiknya. Karena uji autokorelasi terpenuhi, model tetap layak digunakan untuk peramalan jangka pendek.
+
+```{r outlier}
+# Residual yang melebihi 3 simpangan baku (kandidat outlier)
+z <- as.numeric(scale(res))
+idx <- which(abs(z) > 3)
+data.frame(Pengamatan = idx, Tanggal = dat$Tanggal[idx],
+           Kurs = dat$Kurs[idx], Residual = round(as.numeric(res)[idx], 2),
+           Z = round(z[idx], 2))
+```
+
+**Interpretasi.** Tabel di atas menampilkan pengamatan dengan residual di atas 3 simpangan baku, yaitu hari-hari ketika kurs bergerak jauh lebih besar dari perkiraan model. Terdapat tiga pengamatan seperti itu, yaitu pengamatan ke-74, ke-89, dan ke-91. Pengamatan ke-74 paling ekstrem (sekitar 4,4 simpangan baku, kurs turun tajam dari hari sebelumnya). Pengamatan inilah yang menjadi penyebab utama tidak terpenuhinya asumsi normalitas.
+
+## Uji Homoskedastisitas (Efek ARCH)
+
+Diuji dengan Ljung-Box pada kuadrat residual.
+
+- $H_0$: tidak ada efek heteroskedastisitas (variansi konstan)
+- $H_1$: ada efek heteroskedastisitas
+
+```{r arch}
+arch <- Box.test(as.numeric(res)^2, lag = 10, type = "Ljung-Box")
+arch
+```
+
+**Interpretasi.** Diperoleh $p\text{-value}$ = `r round(arch$p.value, 4)` ($> 0{,}05$), sehingga $H_0$ **gagal ditolak**. Tidak ditemukan efek ARCH, artinya variansi residual dapat dianggap **konstan** (homoskedastis). Asumsi kehomogenan variansi terpenuhi.
+
+## Rekapitulasi Diagnostik
+
+```{r rekap-diag}
+rekap <- data.frame(
+  Asumsi = c("Residual white noise (Ljung-Box, lag 10)",
+             "Residual white noise (Ljung-Box, lag 20)",
+             "Normalitas (Shapiro-Wilk)",
+             "Normalitas (Jarque-Bera)",
+             "Homoskedastisitas (Ljung-Box residual^2)"),
+  `p-value` = c(lb10$p.value, lb20$p.value, sw$p.value, jb$p.value, arch$p.value),
+  check.names = FALSE
+)
+rekap$Keputusan <- ifelse(rekap$`p-value` > 0.05, "Terpenuhi", "Tidak terpenuhi")
+kable(rekap, digits = 4, caption = "Ringkasan uji asumsi residual (alpha = 5%)")
+```
+
+**Kesimpulan diagnostik.** Asumsi *white noise* dan homoskedastisitas terpenuhi, sedangkan asumsi normalitas tidak terpenuhi (akibat adanya *outlier*). Secara keseluruhan model ARIMA(0,1,1) masih **layak digunakan** untuk peramalan jangka pendek, dengan catatan selang kepercayaan sebaiknya ditafsirkan secara hati-hati.
+
+# Peramalan
+
+Peramalan dilakukan untuk 10 periode ke depan (pengamatan ke-101 sampai ke-110).
+
+```{r forecast}
+h  <- 10
+fc <- forecast(fit, h = h, level = c(80, 95))
+tab_fc <- data.frame(
+  `Pengamatan ke-` = 101:110,
+  `Ramalan` = as.numeric(fc$mean),
+  `Bawah 80%` = as.numeric(fc$lower[, 1]),
+  `Atas 80%`  = as.numeric(fc$upper[, 1]),
+  `Bawah 95%` = as.numeric(fc$lower[, 2]),
+  `Atas 95%`  = as.numeric(fc$upper[, 2]),
+  check.names = FALSE
+)
+kable(tab_fc, digits = 2, caption = "Hasil peramalan kurs 10 periode ke depan (Rp/USD)")
+```
+
+```{r plot-forecast}
+autoplot(fc) +
+  labs(title = "Peramalan Kurs JISDOR dengan ARIMA(0,1,1)",
+       x = "Pengamatan ke-", y = "Kurs (Rp/USD)") +
+  theme_minimal()
+```
+
+**Interpretasi.** Nilai ramalan kurs untuk 10 periode ke depan adalah sekitar **Rp15.623** dan nilainya **sama (datar)** untuk semua periode. Hal ini wajar karena model ARIMA(0,1,1) tanpa *drift* hanya memakai informasi kurs terakhir dan galat terakhir. Untuk peramalan dua langkah ke depan dan seterusnya, komponen MA sudah tidak berpengaruh sehingga ramalannya tetap. Sementara itu, **selang kepercayaan semakin melebar** seiring bertambahnya horizon waktu. Contohnya, selang 95% pada periode ke-101 sekitar Rp15.520 sampai Rp15.726, sedangkan pada periode ke-110 melebar menjadi sekitar Rp15.226 sampai Rp16.020. Artinya, semakin jauh periode yang diramalkan, semakin besar ketidakpastiannya. Karena itu, model ini lebih andal untuk peramalan jangka pendek.
+
+# Evaluasi Model
+
+## Akurasi pada Data Latih (*In-sample*)
+
+```{r akurasi-in}
+kable(accuracy(fit), digits = 4, caption = "Ukuran akurasi model pada 100 data pertama")
+```
+
+**Interpretasi.** Nilai RMSE sekitar Rp51,84 dan MAE sekitar Rp38,09. Nilai MAPE hanya sekitar **0,25%**, artinya rata-rata kesalahan model hanya sekitar 0,25% dari nilai kurs sebenarnya. Nilai MAPE di bawah 10% termasuk kategori peramalan yang **sangat akurat**.
+
+## Perbandingan dengan Data Aktual (Pengamatan ke-101 sampai ke-110)
+
+Karena file memuat lebih dari 100 data, hasil ramalan dapat dibandingkan dengan data aktual sebagai validasi tambahan (*out-of-sample*).
+
+```{r akurasi-out}
+aktual <- data_all$Kurs[101:110]
+tgl    <- data_all$Tanggal[101:110]
+
+banding <- data.frame(
+  Tanggal = tgl, Aktual = aktual, Ramalan = as.numeric(fc$mean),
+  Selisih = aktual - as.numeric(fc$mean),
+  `Dalam 95%?` = ifelse(aktual >= fc$lower[, 2] & aktual <= fc$upper[, 2], "Ya", "Tidak"),
+  check.names = FALSE
+)
+kable(banding, digits = 2, caption = "Ramalan vs data aktual")
+
+acc_out <- accuracy(fc, aktual)
+kable(acc_out, digits = 4, caption = "Akurasi model (training dan test set)")
+```
+
+```{r plot-banding}
+df_b <- data.frame(Pengamatan = 101:110, Aktual = aktual, Ramalan = as.numeric(fc$mean),
+                   Bawah = as.numeric(fc$lower[, 2]), Atas = as.numeric(fc$upper[, 2]))
+ggplot(df_b, aes(x = Pengamatan)) +
+  geom_ribbon(aes(ymin = Bawah, ymax = Atas), fill = "grey80", alpha = 0.6) +
+  geom_line(aes(y = Ramalan, color = "Ramalan"), linewidth = 1) +
+  geom_line(aes(y = Aktual,  color = "Aktual"),  linewidth = 1) +
+  geom_point(aes(y = Aktual, color = "Aktual")) +
+  scale_color_manual(values = c(Aktual = "firebrick", Ramalan = "steelblue")) +
+  labs(title = "Ramalan vs Aktual (Pengamatan 101-110)",
+       subtitle = "Area abu-abu = selang kepercayaan 95%",
+       x = "Pengamatan ke-", y = "Kurs (Rp/USD)", color = "") +
+  theme_minimal()
+```
+
+**Interpretasi.** Seluruh 10 data aktual berada di dalam selang kepercayaan 95% hasil ramalan. Pada data uji, diperoleh RMSE sekitar Rp49,95 dan MAPE sekitar 0,26%, yang nilainya **hampir sama** dengan akurasi pada data latih. Hal ini menunjukkan model **tidak *overfitting*** dan cukup stabil untuk peramalan jangka pendek. Meskipun demikian, ramalan yang datar tidak dapat menangkap naik-turun harian kurs (misalnya kenaikan hingga sekitar Rp15.731 pada salah satu hari), karena model ini memang hanya memodelkan struktur autokorelasi jangka pendek.
+
+# Kesimpulan
+
+1. Data kurs JISDOR pada 100 pengamatan pertama (1 Agustus - 19 Desember 2022) **tidak stasioner** dalam rata-rata (uji ADF: $p = 0{,}7302$; uji KPSS: $p < 0{,}05$). Data menjadi stasioner setelah dilakukan *differencing* orde 1 ($d = 1$).
+2. Dari delapan model kandidat, model terbaik adalah **ARIMA(0,1,1)** karena BIC terkecil, seluruh parameternya signifikan, paling sederhana, dan sama dengan hasil `auto.arima()`.
+3. Persamaan model: $Y_t = Y_{t-1} + \varepsilon_t + 0{,}2459\,\varepsilon_{t-1}$.
+4. Diagnostik menunjukkan residual bersifat *white noise* dan homoskedastis, tetapi **tidak normal** akibat adanya *outlier*. Ini menjadi keterbatasan model, terutama pada ketepatan selang kepercayaan.
+5. Ramalan kurs 10 periode ke depan adalah sekitar Rp15.623 dengan selang kepercayaan yang melebar seiring horizon. Akurasinya sangat baik (MAPE sekitar 0,25%), dan seluruh data aktual periode 101-110 berada di dalam selang kepercayaan 95%.
+
+## Saran
+
+- Untuk mengatasi ketidaknormalan residual, dapat dicoba penanganan *outlier* atau model lain (misalnya ARIMA dengan intervensi/*outlier detection*).
+- Jika ingin menangkap perubahan variansi pada data yang lebih panjang, dapat dipertimbangkan model kombinasi ARIMA-GARCH.
+- Peramalan sebaiknya diperbarui secara berkala dengan data terbaru karena kurs dipengaruhi banyak faktor eksternal yang tidak dimodelkan.
+
+# Daftar Pustaka {-}
+
+- Box, G. E. P., Jenkins, G. M., Reinsel, G. C., & Ljung, G. M. (2015). *Time Series Analysis: Forecasting and Control* (5th ed.). Wiley.
+- Hyndman, R. J., & Athanasopoulos, G. (2021). *Forecasting: Principles and Practice* (3rd ed.). OTexts. https://otexts.com/fpp3/
+- Bank Indonesia. *Informasi Kurs JISDOR*.
